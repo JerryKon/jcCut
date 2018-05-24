@@ -1,0 +1,598 @@
+// supports physx dynamic engine
+
+global string $cutGrivatyField;
+
+global float $cutAllTime[];
+global string $cutAllDyObj[];
+global vector $cutAllTranslate[];
+global vector $cutAllRotate[];
+
+global proc resetCutState()
+{
+	global float $cutAllTime[];clear $cutAllTime;
+	global string $cutAllDyObj[];clear $cutAllDyObj;
+	global vector $cutAllTranslate[];clear $cutAllTranslate;
+	global vector $cutAllRotate[];clear $cutAllRotate;
+	
+	string $knives[]=`ls -sl`;
+	string $knife = $knives[0];
+	for($knife in $knives)	
+	{
+		string $dyobj=`getAttr ($knife+".dynamicObj")`;
+		string $array[];
+	    $array = stringToStringArray($dyobj, ";");
+	    for($a in $array) 
+		    if($a!=""&&`objExists $a`) delete $a;
+		setAttr -type "string" ($knife+".dynamicObj") "" ;
+		
+		$dyobj=`getAttr ($knife+".notDynamicObj")`;
+	    $array = stringToStringArray($dyobj, ";");
+	    print $array;
+	    for($a in $array) 
+		    if($a!=""&&`objExists $a`) delete $a;
+		    
+		setAttr -type "string" ($knife+".notDynamicObj") "" ;
+		setAttr -type "string" ($knife+".OrignalCutObj") "" ;
+		setAttr -type "string" ($knife+".cutObj") "" ;
+		
+		string $exp=`getAttr ($knife+".cutExpression")`;
+		if($exp!=""&&`objExists $exp`) delete $exp;
+		setAttr -type "string" ($knife+".cutExpression") "" ;
+		string $cutDyGrp=($knife+"_"+"cut_Grp");
+		if(`objExists $cutDyGrp`) delete $cutDyGrp;
+	}
+	
+	global string $cutGrivatyField;
+	if(`objExists $cutGrivatyField`) delete $cutGrivatyField;
+}
+global proc makeDynamicWithPhysx(string $obj, vector $initVelocity,vector $initSpin)
+{
+	select -r $obj;
+	string $dyCmd="nxRigidBody -active -m 1 -den 1 -omd 2 -adp 0 -dp 0 -sf 0.2 -df 0.2 -b 0.6 -iv ";
+	$dyCmd+=$initVelocity.x;
+	$dyCmd+=" ";
+	$dyCmd+=$initVelocity.y;
+	$dyCmd+=" ";	
+	$dyCmd+=$initVelocity.z;		
+	$dyCmd+=" -iav ";
+	$dyCmd+=$initSpin.x;
+	$dyCmd+=" ";
+	$dyCmd+=$initSpin.y;
+	$dyCmd+=" ";	
+	$dyCmd+=$initSpin.z;		
+	eval($dyCmd);
+	}
+global proc makeObjectDynamic(string $obj, vector $initVelocity,vector $initSpin)
+{
+	global string $cutGrivatyField;
+	string $dyCmd="rigidBody -active -m 1 -dp 0 -sf 0.2 -df 0.2 -b 0.6 -l 0 -tf 200 -iv ";
+	$dyCmd+=$initVelocity.x;
+	$dyCmd+=" ";
+	$dyCmd+=$initVelocity.y;
+	$dyCmd+=" ";	
+	$dyCmd+=$initVelocity.z;		
+	$dyCmd+=" -iav ";
+	$dyCmd+=$initSpin.x;
+	$dyCmd+=" ";
+	$dyCmd+=$initSpin.y;
+	$dyCmd+=" ";	
+	$dyCmd+=$initSpin.z;	
+	$dyCmd+=(" -c 0 -pc 0 -i 0 0 0 -imp 0 0 0 -si 0 0 0 -sio none "+$obj );
+	
+	eval($dyCmd);
+	connectDynamic -f $cutGrivatyField $obj;
+}
+global proc addDynamicObj(string $knife,string $newDyObj,string $attr)
+{
+	string $dyobj=`getAttr ($knife+"."+$attr)`;
+	string $array[];
+
+    $array = stringToStringArray($dyobj, ";");
+    if( !stringArrayContains($newDyObj, $array))
+    {
+    	$dyobj+=$newDyObj;
+    	$dyobj+=";";
+	}
+	setAttr -type "string" ($knife+"."+$attr) $dyobj;
+}	
+//返回切出来的两个物体，0是切剩下的，1是切出来的
+global proc doCut(string $knife,int $useEngine)
+{
+	string $allCai=`getAttr ($knife+".cutObj")`;
+	string $caiArray[]=stringToStringArray($allCai,";");
+	vector $initVel=`getAttr ($knife+".dyInitVel")`;
+	vector $initRVel=`getAttr ($knife+".dyInitRandomVel")`;	
+	vector $initSpin=`getAttr ($knife+".dyInitSpin")`;
+	vector $initRSpin=`getAttr ($knife+".dyInitRandomSpin")`;
+	
+	string $notDynamic=($knife+"_"+"cut_NotDy");
+	string $ydynamic=($knife+"_"+"cut_Dy");
+	string $newCutObj="";
+	for($cai in $caiArray)
+	{
+		//做两次布尔运算，所以要把刀子和菜复制两次
+		string $realKnife1[]=`duplicate -rr $knife`;
+		string $realKnife2[]=`duplicate -rr $knife`;
+		polyNormal -normalMode 0 -userNormalMode 1 -ch 0 $realKnife2[0];
+		//delete -ch $realKnife2[0];	
+		
+		string $realCai1[]=`duplicate -rr $cai`;
+		string $realCai2[]=`duplicate -rr $cai`;
+		
+		//----被切剩下的
+		string $finalCai1[]=`polyBoolOp -ch 0 -op 3 -useThresholds 1 -preserveColor 0 $realKnife1[0] $realCai1[0]`;
+			
+		//该物体为要变成动力学的物体
+		string $finalCai2[]=`polyBoolOp -ch 0 -op 3 -useThresholds 1 -preserveColor 0 $realKnife2[0] $realCai2[0]`;
+	
+		//delete $realKnife1[0] $realKnife2[0];
+		
+		int $cut=`currentTime -q`;
+		int $lastT=$cut-1;
+		
+		string $newName="";
+		int $polyF[]=`polyEvaluate -f $finalCai2[0]`;
+		if($polyF[0]!=0)
+		{
+			$newName=`rename $finalCai2[0] "dynamicObj#"`;
+			parent $newName $ydynamic;
+			setKeyframe -t $lastT -v 0 ($newName+".v");
+			setKeyframe -t $cut -v 1 ($newName+".v");
+			vector $newIniV = $initVel + <<rand(-$initRVel.x,$initRVel.x),rand(-$initRVel.y,$initRVel.y),rand(-$initRVel.z,$initRVel.z)>>;
+			vector $newSpin = $initSpin + <<rand(-$initRSpin.x,$initRSpin.x),rand(-$initRSpin.y,$initRSpin.y),rand(-$initRSpin.z,$initRSpin.z)>>;	
+			if(!$useEngine)
+				makeObjectDynamic($newName,$newIniV,$newSpin);
+			else
+				makeDynamicWithPhysx($newName,$newIniV,$newSpin);
+				
+			//----------将动力学物体存储起来
+			addDynamicObj($knife,$newName,"dynamicObj");
+		}
+		else
+			delete $finalCai2[0];
+		
+		//----------将非动力学物体存储起来。
+		$newName=`rename $finalCai1[0] "leftObj#"`;
+		parent $newName $notDynamic;
+		//将新切剩下的菜key帧
+		setKeyframe -t $lastT -v 0 ($newName+".v");
+		setKeyframe -t $cut -v 1 ($newName+".v");	
+		addDynamicObj($knife,$newName,"notDynamicObj");
+		
+		$newCutObj+=$newName;
+		$newCutObj+=";";		
+		
+		//将原来得菜隐藏并key帧
+		setAttr ($cai+".v") 0;
+		setKeyframe ($cai+".v");
+	}
+	
+	setAttr -type "string" ($knife+".cutObj") $newCutObj;
+}	
+global proc keyObjsInKnife(string $knife)
+{
+	
+	global float $cutAllTime[];
+	global string $cutAllDyObj[];
+	global vector $cutAllTranslate[];
+	global vector $cutAllRotate[];
+		
+	string $dyobj=`getAttr ($knife+".dynamicObj")`;
+	string $array[];
+	float $cut=`currentTime -q`;
+    $array = stringToStringArray($dyobj, ";");
+    for($obj in $array)
+    {   
+	    $cutAllTime[`size $cutAllTime`] = $cut;
+	    $cutAllDyObj[`size $cutAllDyObj`] = $obj;
+	    $cutAllTranslate[`size $cutAllTranslate`]=`getAttr ($obj+".translate")`;
+	    $cutAllRotate[`size $cutAllRotate`]=`getAttr ($obj+".rotate")`;
+	}
+}
+global proc checkCut(string $knife,int $physx)
+{
+	string $cai=`getAttr ($knife+".cutObj")`;
+	int $cutActive =`getAttr ($knife+".cutActive")`;
+	if(!$cutActive) return;
+	
+	float $cutAttrValue=`getAttr ($knife+".cutAttr")`;
+	float $attrDown=`getAttr ($knife+".cutDownBound")`;
+	float $attrUp=`getAttr ($knife+".cutUpBound")`;
+	int $cutOrNot=`getAttr ($knife+".cut")`;
+	
+	
+	if($cutAttrValue>=$attrUp)
+		setAttr ($knife+".cut") 1;
+	else if($cutAttrValue<=$attrDown && $cutOrNot==1)
+	{
+		//在这里切
+		doCut($knife,$physx);
+		setAttr ($knife+".cut") 0;
+		select -cl;
+	}
+	keyObjsInKnife($knife);
+}
+
+global proc makePolyAsKnife(string $knife,string $cutObj,string $cutAttr,float $attrUpBound,float $attrDownBound)
+{
+	global string $cutGrivatyField;
+	int $useEngine=`checkBoxGrp -q -v1 useEngine`;
+	
+	
+	
+	string $cutDyGrp=($knife+"_"+"cut_Grp");
+	if(`objExists $cutDyGrp`) delete $cutDyGrp;
+	createNode transform -n $cutDyGrp;
+	
+	string $notDynamic=($knife+"_"+"cut_NotDy");
+	if(`objExists $notDynamic`) delete $notDynamic;
+	createNode transform -n $notDynamic -p $cutDyGrp;
+	
+	string $ydynamic=($knife+"_"+"cut_Dy");
+	if(`objExists $ydynamic`) delete $ydynamic;
+	createNode transform -n $ydynamic -p $cutDyGrp;	
+	
+	if(!`attributeExists "cutActive" $knife`)
+	{
+		addAttr -ln "cutActive"  -at bool  $knife;
+		setAttr -e-keyable true ($knife+".cutActive");		
+	}
+	//-------------用来判断是否是刀的状态
+	if(!`attributeExists "cut" $knife`)
+	{
+		addAttr -ln "cut"  -at bool  $knife;
+		setAttr -e-keyable true ($knife+".cut");		
+	}
+	//创建动力学
+	if( ($cutGrivatyField==""||!`objExists $cutGrivatyField`) && !$useEngine )
+	{
+		string $gravity[]= `gravity -pos 0 0 0 -m 9.8 -att 0 -dx 0 -dy -1 -dz 0  -mxd -1  -vsh none -vex 0 -vof 0 0 0 -vsw 360 -tsr 0.5 -n "cutDynamicGravity#"`;
+		$cutGrivatyField = $gravity[0];
+	}
+	if($useEngine)
+		physxShelf_editPhysXCommand;
+		
+	//-----------------此数据变化是判断是否进行切割，一般情况下跟一个位置数据相连接。
+	if(!`attributeExists "cutAttr" $knife`)
+	{
+		addAttr -ln "cutAttr"  -at double  -min 0 -dv 1 $knife;
+		setAttr -e-keyable true ($knife+".cutAttr");
+	}
+	string $cutExp[]=`listConnections ($knife+".cutAttr")`;
+	if(`size $cutExp`!=0) delete $cutExp[0];
+	
+	expression -s ("cutAttr ="+$cutAttr+";\n")  -o $knife -ae 1 -uc all ;
+	
+	//--------------当刀片的判断数据小于这个数值的时候才开始切
+	if(!`attributeExists "cutDownBound" $knife`)
+	{
+		addAttr -ln "cutDownBound"  -at double -dv $attrDownBound $knife;
+		setAttr -e-keyable true ($knife+".cutDownBound");
+	}
+	setAttr ($knife+".cutDownBound") $attrDownBound;		
+		
+	//--------------当刀片的判断数据大于这个数值的时候才使其成为刀片
+	if(!`attributeExists "cutUpBound" $knife`)
+	{
+		addAttr -ln "cutUpBound"  -at double  -dv $attrUpBound $knife;
+		setAttr -e-keyable true ($knife+".cutUpBound");
+	}
+	setAttr ($knife+".cutUpBound") $attrUpBound;
+	
+	//---------------------------------------------------------------------------
+	float $initVel[]=`floatFieldGrp -q -value dyInitVelField`;
+    float $initRVel[]= `floatFieldGrp -q -value dyRandomInitVelField`;
+    float $initSpin[]= `floatFieldGrp -q -value dyInitOrienField`;
+    float $initRSpin[]= `floatFieldGrp -q -value dyRandomInitOrienField`; 
+    int $seed[]=`intFieldGrp -q -value randSeedField`;
+         
+	if(!`attributeExists "dyInitVel" $knife`)
+	{
+		addAttr -ln "dyInitVel"  -at double3 $knife;
+		addAttr -ln "dyInitVelX"  -at double -p dyInitVel $knife;		
+		addAttr -ln "dyInitVelY"  -at double -p dyInitVel $knife;	
+		addAttr -ln "dyInitVelZ"  -at double -p dyInitVel $knife;	
+		
+		setAttr -e-keyable true ($knife+".dyInitVel");
+		setAttr -e-keyable true ($knife+".dyInitVelX");
+		setAttr -e-keyable true ($knife+".dyInitVelY");
+		setAttr -e-keyable true ($knife+".dyInitVelZ");
+	}	
+	setAttr -type double3 ($knife+".dyInitVel") $initVel[0] $initVel[1] $initVel[2] ;
+	
+	if(!`attributeExists "dyInitRandomVel" $knife`)
+	{
+		addAttr -ln "dyInitRandomVel"  -at double3 $knife;
+		addAttr -ln "dyInitRandomVelX"  -at double -p dyInitRandomVel $knife;		
+		addAttr -ln "dyInitRandomVelY"  -at double -p dyInitRandomVel $knife;	
+		addAttr -ln "dyInitRandomVelZ"  -at double -p dyInitRandomVel $knife;	
+		
+		setAttr -e-keyable true ($knife+".dyInitRandomVel");
+		setAttr -e-keyable true ($knife+".dyInitRandomVelX");
+		setAttr -e-keyable true ($knife+".dyInitRandomVelY");
+		setAttr -e-keyable true ($knife+".dyInitRandomVelZ");
+	}	
+	setAttr -type double3 ($knife+".dyInitRandomVel") $initRVel[0] $initRVel[1] $initRVel[2] ;	
+	
+	if(!`attributeExists "dyInitSpin" $knife`)
+	{
+		addAttr -ln "dyInitSpin"  -at double3 $knife;
+		addAttr -ln "dyInitSpinX"  -at double -p dyInitSpin $knife;		
+		addAttr -ln "dyInitSpinY"  -at double -p dyInitSpin $knife;	
+		addAttr -ln "dyInitSpinZ"  -at double -p dyInitSpin $knife;	
+		
+		setAttr -e-keyable true ($knife+".dyInitSpin");
+		setAttr -e-keyable true ($knife+".dyInitSpinX");
+		setAttr -e-keyable true ($knife+".dyInitSpinY");
+		setAttr -e-keyable true ($knife+".dyInitSpinZ");
+	}	
+	setAttr -type double3 ($knife+".dyInitSpin") $initSpin[0] $initSpin[1] $initSpin[2] ;	
+	
+	if(!`attributeExists "dyInitRandomSpin" $knife`)
+	{
+		addAttr -ln "dyInitRandomSpin"  -at double3 $knife;
+		addAttr -ln "dyInitRandomSpinX"  -at double -p dyInitRandomSpin $knife;		
+		addAttr -ln "dyInitRandomSpinY"  -at double -p dyInitRandomSpin $knife;	
+		addAttr -ln "dyInitRandomSpinZ"  -at double -p dyInitRandomSpin $knife;	
+		
+		setAttr -e-keyable true ($knife+".dyInitRandomSpin");
+		setAttr -e-keyable true ($knife+".dyInitRandomSpinX");
+		setAttr -e-keyable true ($knife+".dyInitRandomSpinY");
+		setAttr -e-keyable true ($knife+".dyInitRandomSpinZ");
+	}	
+	setAttr -type double3 ($knife+".dyInitRandomSpin") $initRSpin[0] $initRSpin[1] $initRSpin[2] ;		
+	//---------------------------------------------------------------------------------
+	
+	
+	
+	//-------------存储最开始要切的物体
+	if(!`attributeExists "OrignalCutObj" $knife`)
+	{
+		addAttr -ln "OrignalCutObj"  -dt "string"  $knife;
+		setAttr -e-keyable true ($knife+".OrignalCutObj");
+	}
+	//把要切的物体复制一个进行切割
+	setAttr -type "string" ($knife+".OrignalCutObj") $cutObj;	
+	
+	
+	//-------------每次切得时候要更新的被切的物体
+	if(!`attributeExists "cutObj" $knife`)
+	{
+		addAttr -ln "cutObj"  -dt "string"  $knife;
+		setAttr -e-keyable true ($knife+".cutObj");
+	}
+
+	//-------------已经被切的成为动力学的物体
+	if(!`attributeExists "dynamicObj" $knife`)
+	{
+		addAttr -ln "dynamicObj"  -dt "string"  $knife;
+		setAttr -e-keyable true ($knife+".dynamicObj");
+	}
+	
+	//-------------存储切剩下的物体
+	if(!`attributeExists "notDynamicObj" $knife`)
+	{
+		addAttr -ln "notDynamicObj"  -dt "string"  $knife;
+		setAttr -e-keyable true ($knife+".notDynamicObj");
+	}
+
+	
+	
+	string $allCutObj[]=stringToStringArray($cutObj,";");
+	string $realCaiStr="";
+	for($co in $allCutObj)
+	{
+		string $realCai[]=`duplicate -rr $co`;
+		setAttr ($co+".visibility") 0;
+		setAttr ($realCai[0]+".visibility") 1;
+		$realCaiStr += $realCai[0];
+		$realCaiStr += ";";
+		parent $realCai[0] $notDynamic;
+		addDynamicObj($knife,$realCai[0],"notDynamicObj");
+	}
+	setAttr -type "string" ($knife+".cutObj") $realCaiStr;		
+	
+	//记录切割表达式的名字
+	if(!`attributeExists "cutExpression" $knife`)
+	{
+		addAttr -ln "cutExpression"  -dt "string"  $knife;
+		setAttr -e-keyable true ($knife+".cutExpression");	
+	}
+	
+	float $cutAttrValue=`getAttr ($knife+".cutAttr")`;
+	if($cutAttrValue>$attrDownBound)
+		setAttr ($knife+".cut") 1;
+	else
+		setAttr ($knife+".cut") 0;
+	int $sjid=0;	
+	
+	string $exp=`getAttr ($knife+".cutExpression")`;
+	if($exp!=""&&`objExists $exp`) 
+		delete $exp;
+	string $expCut="checkCut(\""+$knife+"\","+$useEngine+");";
+	
+	$cutExpression=`expression -s $expCut -ae 1 -uc all` ;
+	setAttr -type "string" ($knife+".cutExpression") $cutExpression ;
+	select -cl;
+}
+global proc doSimulation()
+{
+	global float $cutAllTime[];clear $cutAllTime;
+	global string $cutAllDyObj[];clear $cutAllDyObj;
+	global vector $cutAllTranslate[];clear $cutAllTranslate;
+	global vector $cutAllRotate[];clear $cutAllRotate;
+	
+	float $timeRange[]=`floatFieldGrp -q -value simulationTime`; 
+	currentTime -e $timeRange[0];
+	float $byFrame=`floatFieldGrp -q -value1 simulationByFrame`;
+	int $useEngine=`checkBoxGrp -q -v1 useEngine`;
+	
+	//-----------只将选择的物体打开解算
+	string $sel[]=`ls -sl`;
+	if(`size $sel`==0) error "No knife selected.";
+	string $selTran[]=`ls -type "transform"`;
+	string $allKnives[];
+	for($t in $selTran)
+	{
+		if(`attributeExists "cutActive" $t `)
+		{
+			$allKnives[`size $allKnives`]=$t;
+			setAttr ($t+".cutActive") 0;
+		}
+	}
+	for($s in $sel)
+	{
+		if(`attributeExists "cutActive" $s `)
+		{
+			setAttr ($s+".cutActive") 1;
+			string $cutObj = `getAttr ($s+".cutObj")`;
+			string $allCutObj[]=stringToStringArray($cutObj,";");
+			for($co in $allCutObj)
+				setKeyframe -v 1 ($co+".visibility");
+		}
+	}
+	///--------------------------------------
+	int $seed[]=`intFieldGrp -q -value randSeedField`;
+	seed($seed[0]);
+	//----------解算时间	
+	float $i=$timeRange[0];
+	for(;$i<=$timeRange[1];$i+=$byFrame)
+		currentTime -e $i;
+	
+	//删除刚体
+	select $cutAllDyObj;
+	if(!$useEngine)
+		DeleteRigidBodies;
+	else
+		nxDeleteRigidBody;
+	
+	int $ii=0;
+ 	vector $tempV;
+ 	for(;$ii<`size $cutAllTime`;$ii++)
+ 	{
+	 	$tempV = $cutAllTranslate[$ii];
+	 	setKeyframe -t $cutAllTime[$ii] -v ($tempV.x) ($cutAllDyObj[$ii]+".tx");
+	 	setKeyframe -t $cutAllTime[$ii] -v ($tempV.y) ($cutAllDyObj[$ii]+".ty");
+	 	setKeyframe -t $cutAllTime[$ii] -v ($tempV.z) ($cutAllDyObj[$ii]+".tz");
+	 	$tempV = $cutAllRotate[$ii];
+	 	setKeyframe -t $cutAllTime[$ii] -v ($tempV.x) ($cutAllDyObj[$ii]+".rx");
+	 	setKeyframe -t $cutAllTime[$ii] -v ($tempV.y) ($cutAllDyObj[$ii]+".ry");
+	 	setKeyframe -t $cutAllTime[$ii] -v ($tempV.z) ($cutAllDyObj[$ii]+".rz");
+ 	}
+ 	
+ 	//关掉切割
+ 	for($kn in $allKnives)
+ 		setAttr ($kn+".cutActive") 0;
+ 	select -cl;
+}
+	
+	
+global proc assignKnife()
+{
+	string $sel[]=`ls -sl`;
+	if(`size $sel`==0) error "select polygon or surface.";
+	textFieldButtonGrp -e -text $sel[0] getKnifeField;
+}
+
+global proc assignVeg()
+{
+	string $sel[]=`ls -sl`;
+	if(`size $sel`==0) error "select polygon or surface.";
+	string $str="";
+	for($v in $sel)
+	{
+		$str+=$v;
+		$str+=";";
+	}
+	textFieldButtonGrp -e -text $str getVegetableField;
+}	
+global proc doMakeKnife()
+{
+	string $kni=`textFieldButtonGrp -q -text getKnifeField`;
+	string $veg=`textFieldButtonGrp -q -text getVegetableField`;
+	string $cutAttr=`optionMenuGrp -q  -v cutAttrs`;
+	float $boundV[]=`floatFieldGrp -q -v cutBoundField`;
+	makePolyAsKnife($kni,$veg,$cutAttr,$boundV[1],$boundV[0]);
+}
+global proc doStopKnife()
+{
+	string $sel[]=`ls -sl`;
+	for($s in $sel)
+	{
+		if(`attributeExists "cutActive" $s `)
+			setAttr ($s+".cutActive") 0;
+	}
+}
+
+global proc jcCut()
+{
+	if(`window -ex qiecaiWin`)
+         deleteUI -window qiecaiWin;
+	window -title "jc Cut 1.1"
+ 		-iconName "ct"
+ 		-widthHeight 300 210 qiecaiWin;
+ 	columnLayout -adjustableColumn true;
+ 		
+ 		text -label "www.jerrykon.com"; 
+ 		separator -height 5 ;
+ 		textFieldButtonGrp
+    		-ed true
+        	-label "Knife"
+        	-text  ""
+        	-cal 1 "center"
+        	-buttonLabel "Pick"
+        	-bc "assignKnife"
+        	getKnifeField;
+   		textFieldButtonGrp
+    		-ed true
+        	-label "Vegetables"
+        	-text  ""
+        	-cal 1 "center"
+        	-buttonLabel "Pick"
+        	-bc "assignVeg"
+        	getVegetableField;
+        floatFieldGrp -numberOfFields 2
+    			-label "Cut Bound" -precision 3 -value1 -5  -value2 5 cutBoundField;    	
+    	string $attrs = `optionMenuGrp -label "Cut Attrs" cutAttrs`;
+			menuItem -label "tx";
+			menuItem -label "ty";
+			menuItem -label "tz";
+			menuItem -label "rx";
+			menuItem -label "ry";
+			menuItem -label "rz";
+			
+			
+    	separator -height 5 ; 
+    	checkBoxGrp 
+	        -numberOfCheckBoxes 1
+	        -label "Dynamic Engine"
+	        -l1 "Use Physx" -v1 0       
+	        useEngine;
+        floatFieldGrp -numberOfFields 3
+    			-label "Dynamic Initial Velocity" -precision 3 -value1 1  -value2 1  -value3 0 dyInitVelField;
+        floatFieldGrp -numberOfFields 3
+    			-label "Random Initial Velocity" -precision 3 -value1 0.1  -value2 0.1  -value3 0.1 dyRandomInitVelField;
+        floatFieldGrp -numberOfFields 3
+    			-label "Dynamic Initial Spin" -precision 3 -value1 0  -value2 0  -value3 20 dyInitOrienField;
+        floatFieldGrp -numberOfFields 3
+    			-label "Random Initial Spin" -precision 3 -value1 0  -value2 0  -value3 5 dyRandomInitOrienField; 
+    	intFieldGrp -numberOfFields 1
+         -label "Random Seed" -value1 0 randSeedField;
+        button -bgc 0.68 0.8 0.55 -label "Make Knife" -command "doMakeKnife";
+        separator -height 10 ; 
+        
+        
+        float $s=`playbackOptions -q -min`;
+        float $e=`playbackOptions -q -max`;
+        floatFieldGrp -numberOfFields 2
+    			-label "Time Range" -precision 3 -value1 $s  -value2 $e simulationTime;     
+    	floatFieldGrp -numberOfFields 1  -label "By Frame" -precision 2 -value1 1 simulationByFrame;     
+	 	button -bgc 0.8 0.55 0.74 -label "Simulate Selected Knife" -command "doSimulation" rigidSimulation; 
+	 	
+	 	separator -height 10 ; 
+        button -label "Make Selected Knives Unactive" -command "doStopKnife";        
+        button -label "Clear All Objs In Selected Knife" -command "resetCutState";
+        
+ 	window -e -widthHeight 420 450 qiecaiWin ;
+	showWindow qiecaiWin;	
+	}
